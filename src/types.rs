@@ -4,48 +4,61 @@ use thiserror::Error;
 pub type SharedHashPair = Rc<RefCell<HashPair>>;
 
 #[derive(Debug)]
+/// HashPair represents the hash value with both String and bytes representation
 pub struct HashPair {
     pub hash_key: String,
     pub bytes: Vec<u8>,
 }
 
 impl HashPair {
+    /// Construct new pair with both string and bytes arguments
     pub fn new(hash_key: String, bytes: Vec<u8>) -> Self {
         Self { hash_key, bytes }
     }
 
+    /// Construct new pair with only hash string key, if successful generates bytes
     pub fn new_shared_key(hash_key: String) -> Result<SharedHashPair, MerkError> {
         let bytes: Vec<u8> = Hex::decode(&hash_key)?;
         Ok(Self::new_shared(hash_key, bytes))
     }
 
+    /// Construct new hash pair with ref counting enabled
+    /// reducing storage size if many duplicate hashes
     pub fn new_shared(hash_key: String, bytes: Vec<u8>) -> SharedHashPair {
         Rc::new(RefCell::new(HashPair::new(hash_key, bytes)))
     }
 }
 
+// Hexadecimal prefix to indicate hex value
 const HEX_PREFIX: &str = "0x";
+
+// Hexadecimal base computed using base 16
 const HEX_BASE: u32 = 16;
 
-// Unit struct to wrap hex encode and decode
+// Unit struct representing a hex value to wrap
+// hex encode, decode, trim and scale logic
+
 pub struct Hex;
 
 impl Hex {
+    /// Encode data into hexadecimal string format
     pub fn encode<T: AsRef<[u8]>>(data: T) -> String {
         hex::encode(data)
     }
 
+    /// Decode str into vec of bytes if well-formed
     pub fn decode(value: &str) -> Result<Vec<u8>, MerkError> {
         let data = Hex::trim_prefix(value);
         let bytes = hex::decode(data)?;
         Ok(bytes)
     }
 
+    /// Strips common hex notation prefix
     pub fn trim_prefix(text: &str) -> &str {
         text.trim_start_matches(HEX_PREFIX)
     }
 
-    // Given a value in hex string form, give ability to multiply it by scaling factor
+    /// Scale hex value as represented in String form by scale factor returning String
     pub fn scale(scale: usize, value: &str) -> String {
         use num_bigint::BigInt;
         use num_traits::FromPrimitive;
@@ -63,12 +76,15 @@ impl Hex {
     }
 }
 
-// Unit struct HashConcat or HashCat for brevity
-// Handles concatenating two byte slices before hashing
+/// Unit struct HashConcat or HashCat for brevity
+/// Handles concatenating two byte slices before hashing
+
 pub struct HashCat;
 
 impl HashCat {
-    // Hash Helper methods
+    /// Hash Helper methods to concat values then hashes aggregate
+
+    /// Concats str and bytes slice before hashing
     pub fn concat_l(l: &str, r_bytes: &[u8]) -> Result<Vec<u8>, MerkError> {
         let l2 = Hex::trim_prefix(l);
         let l_bytes: Vec<u8> = Hex::decode(l2)?;
@@ -76,6 +92,7 @@ impl HashCat {
         Ok(Self::concat(&l_bytes, r_bytes))
     }
 
+    /// Concats bytes slice and str before hashing
     pub fn concat_r(l_bytes: &[u8], r: &str) -> Result<Vec<u8>, MerkError> {
         let r2 = Hex::trim_prefix(r);
         let r_bytes: Vec<u8> = Hex::decode(r2)?;
@@ -83,6 +100,7 @@ impl HashCat {
         Ok(Self::concat(l_bytes, &r_bytes))
     }
 
+    /// Concats two bytes slice before hashing
     pub fn concat(l: &[u8], r: &[u8]) -> Vec<u8> {
         use sha3::{Digest, Sha3_256};
 
@@ -92,18 +110,22 @@ impl HashCat {
             .chain(r.iter().cloned())
             .collect::<Vec<u8>>();
 
+        // SHA3-256 generates a fixed-size hash output of 256 bits,
         let mut hasher = Sha3_256::new();
-        hasher.update(concat); // input msg to be hashed
-        hasher.finalize().to_vec() // hash operation
+        hasher.update(concat);
+        hasher.finalize().to_vec() // actual hash operation
     }
 }
 
-// Simple aggregate error type to give calling code options
-
+// Simple aggregate error type
 #[derive(Error, Debug, PartialEq)]
 pub enum MerkError {
     #[error("Unable to decode hex string into bytes vector -- {0}")]
     Hex(#[from] hex::FromHexError),
+    #[error("Verify fail -- {0}")]
+    VerifyFail(String),
+    #[error("Node not found -- {0}")]
+    NodeNotFound(String),
 }
 
 #[cfg(test)]
@@ -125,6 +147,33 @@ mod tests {
             "Unable to decode hex string into bytes vector -- Odd number of digits",
             error.to_string()
         )
+    }
+
+    #[test]
+    pub fn hex_scale() {
+        assert_eq!(
+            Hex::scale(
+                2,
+                "0x1111111111111111111111111111111111111111111111111111111111111111"
+            ),
+            "2222222222222222222222222222222222222222222222222222222222222222"
+        );
+
+        assert_eq!(
+            Hex::scale(
+                10,
+                "0x1111111111111111111111111111111111111111111111111111111111111111"
+            ),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+
+        assert_eq!(
+            Hex::scale(
+                1000,
+                "0x1111111111111111111111111111111111111111111111111111111111111111"
+            ),
+            "42aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa68"
+        );
     }
 
     #[test]

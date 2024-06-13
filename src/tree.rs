@@ -1,3 +1,8 @@
+/// MerkleTree implements a complete binary tree used to efficiently in O(log n)
+/// time answer the question whether a key is contained locally
+
+/// For large datasets this is particulary efficient as all that is necessary to prove
+/// residency is an audit proof which describes the audit hash path from the leaf node to root
 use either::*;
 use std::collections::HashMap;
 
@@ -13,54 +18,71 @@ pub struct MerkleTree {
     depth: usize,
     size: usize,
     leaf_start_index: usize,
-    // store comprises the tree data structure, it maps the node index to the shared hash pair
+    /// Store comprises the tree data structure,
+    /// it maps the node index to the shared hash pair for compactness
     store: HashMap<usize, SharedHashPair>,
-    // store a single master copy of shared Rc values
-    master: HashMap<String, SharedHashPair>, 
+    // The single master copy contains shared ref counted hash pairs
+    master: HashMap<String, SharedHashPair>,
 }
 
 impl MerkleTree {
+    /// Constructs complete binary merkle tree given depth and initial leaf values
     pub fn new(depth: usize, initial_value: &str) -> Self {
         if depth == 0 || depth > MAX_DEPTH {
             panic!("Specified depth must be greater than 0 and less than 30");
         }
 
+        if initial_value.len() % 2 == 1 {
+            panic!("Initial value representing hexadecimal must be wellformed, can not be of odd length")
+        }
+
         let size = Self::size(depth);
-        let store = HashMap::with_capacity(size); // Maps tree index out to original rc values store in master
-        let master = HashMap::with_capacity(depth); // Shared out rc originals
+        let store = HashMap::with_capacity(size); // Maps tree node index to original rc values store in master
+
+        // Contains master single copy store of shared hash values
+        // Given that all the levels initially have the same values, as the values percolate up to the root, the size is depth
+        let master = HashMap::with_capacity(depth);
 
         let mut tree = Self {
             depth,
             size,
-            leaf_start_index: Self::size(depth - 1),
+            leaf_start_index: Self::size(depth - 1), // start of leave node indices
             store,
             master,
         };
 
         tree.initialize(initial_value)
-            .expect("Unable to create tree"); // 
+            .expect("Unable to create tree");
 
         tree
     }
 
+    /// Fetches root hash value
     pub fn root(&self) -> String {
         self.store
             .get(&0)
             .map_or(String::new(), |v| v.borrow().hash_key.clone())
     }
 
+    /// Number of leaf values in tree
     pub fn num_leaves(&self) -> usize {
         self.size - self.leaf_start_index
     }
 
-    pub fn set_with_scale(&mut self, leaf_index: usize, scale: usize, value: &str) {
+    /// Updates a single leaf value and recomputes any affected nodes
+    pub fn set_with_scale(
+        &mut self,
+        leaf_index: usize,
+        scale: usize,
+        value: &str,
+    ) -> Result<(), MerkError> {
         if value.len() % 2 == 1 {
-            eprintln!("unable to set as value is malformed as len is of odd length");
-            return;
+            eprintln!("unable to set as value is malformed hex value with len of odd length");
+            return Err(MerkError::Hex(hex::FromHexError::OddLength));
         }
 
         if !self.valid_leaf_index(leaf_index) {
-            return;
+            return Err(MerkError::NodeNotFound(String::from("Invalid leaf index")));
         }
 
         let v = Hex::trim_prefix(value);
@@ -73,12 +95,18 @@ impl MerkleTree {
         self.set(leaf_index + self.leaf_start_index, value)
     }
 
-    pub fn proof(&self, leaf_index: usize) -> Vec<Either<String, String>> {
+    /// Given a tree and leaf index returns the merkle proof for that leaf
+    /// Left and Right values indicate location of (sibling) audit path hashes
+
+    /// Audit proof in O(log n) generates an audit trail that proves (leaf) entry exists
+    pub fn proof(&self, leaf_index: usize) -> MerkleProof {
         let mut acc = vec![];
 
         if !self.valid_leaf_index(leaf_index) {
             return acc;
         }
+
+        let mut terminate = false;
 
         let mut index = leaf_index + self.leaf_start_index;
 
@@ -91,9 +119,17 @@ impl MerkleTree {
             };
 
             let path_hash_item = sibling_index.map(|idx| {
-                let sibling_hash = self.store.get(&idx).unwrap();
-                sibling_hash.borrow().hash_key.clone()
+                if let Some(sibling_hash) = self.store.get(&idx) {
+                    sibling_hash.borrow().hash_key.clone()
+                } else {
+                    terminate = true;
+                    String::new()
+                }
             });
+
+            if terminate {
+                return vec![];
+            }
 
             acc.push(path_hash_item);
 
@@ -103,7 +139,11 @@ impl MerkleTree {
         acc
     }
 
-    pub fn verify(&self, proof: MerkleProof, leaf_value: &str) -> Result<String, MerkError> {
+    /// Given a merkle proof and leaf value key, recomputes root hash, confirming entry exists in tree
+    pub fn verify(&self, proof: &MerkleProof, leaf_value: &str) -> Result<String, MerkError> {
+        if proof.is_empty() {
+            return Err(MerkError::VerifyFail("Proof empty".to_string()));
+        }
         let mut acc_bytes: Vec<u8> = Hex::decode(leaf_value)?;
 
         for path_item in proof.iter() {
@@ -120,9 +160,10 @@ impl MerkleTree {
 
     /******************* Index API functions ********************/
 
+    #[allow(dead_code)]
     pub(crate) fn index(&self, depth: usize, offset: usize) -> usize {
         // (2,0) => 2^depth -1 + offset => 2^2 - 1 + 0 => 3 index
-        let index = usize::pow(2, depth as u32) - 1 + offset; 
+        let index = usize::pow(2, depth as u32) - 1 + offset;
 
         if index >= self.size {
             eprintln!("Index is too large, and does not exist in tree");
@@ -132,6 +173,7 @@ impl MerkleTree {
         index
     }
 
+    /// Returns parent index of current node index
     pub(crate) fn parent_index(&self, index: usize) -> usize {
         if index == 0 || index >= self.size {
             return ROOT_INDEX;
@@ -144,6 +186,7 @@ impl MerkleTree {
         }
     }
 
+    /// Returns left child node index given parent index
     pub(crate) fn left_child_index(&self, index: usize) -> usize {
         let child_index = 2 * index + 1;
         if child_index >= self.size {
@@ -153,6 +196,7 @@ impl MerkleTree {
         child_index
     }
 
+    /// Returns right child node index given parent index
     pub(crate) fn right_child_index(&self, index: usize) -> usize {
         let child_index = 2 * index + 2;
 
@@ -165,6 +209,10 @@ impl MerkleTree {
 
     /******************* Private helper functions  ********************/
 
+    /// Constructs tree from bottom up leaf level first
+    /// Generates concat hash and percolates that value to intermediate inner nodes
+    /// all the way to root
+    /// Stores the hash values in reference counted shared hash values kept in store table and master table
     fn initialize(&mut self, value: &str) -> Result<(), MerkError> {
         let mut acc_hash_str = Hex::trim_prefix(value).to_string();
         let mut acc_bytes: Vec<u8> =
@@ -174,7 +222,6 @@ impl MerkleTree {
 
         // Traverse levels of merkle tree starting with last level (leaves first)
         // Until reach root node - root level
-
         for d in (0..self.depth).rev() {
             let shared_hash = HashPair::new_shared(acc_hash_str.clone(), acc_bytes);
 
@@ -197,9 +244,9 @@ impl MerkleTree {
         Ok(())
     }
 
-    // recursive set function that sets specified tree node index with appropriate
-    // hash string value
-    fn set(&mut self, index: usize, value: String) {
+    // Recursive set function that sets specified tree node index with appropriate
+    // hash string value if possible. If value is not well formed will prematurely error
+    fn set(&mut self, index: usize, value: String) -> Result<(), MerkError> {
         // While replacing hash value, check if old value is no longer
         // being referenced from bulk initialization
         self.prune(index);
@@ -209,30 +256,37 @@ impl MerkleTree {
 
         // TODO: value doesn't need to be wrapped in RC,
         // Store should take either SharedHashPair or HashPair
-        let new_hash = HashPair::new_shared_key(value).unwrap();
+        let new_hash = HashPair::new_shared_key(value).inspect_err(|e| eprintln!("Set - {e}"))?;
+
         self.store.insert(index, new_hash.clone());
 
         let p_index = self.parent_index(index);
 
         if index == p_index {
-            return;
+            return Ok(());
         } // reached the top, nothing further to do, abort from recursion
 
         let l_index = self.left_child_index(p_index);
         let r_index = self.right_child_index(p_index);
 
-        let l_hash = self.store.get(&l_index).unwrap();
-        let r_hash = self.store.get(&r_index).unwrap();
+        let l_hash = self
+            .store
+            .get(&l_index)
+            .expect("unexpected, left child not found");
+        let r_hash = self
+            .store
+            .get(&r_index)
+            .expect("unexpected, right child not found");
 
         // compute new parent hash
         let p_hash = HashCat::concat(&l_hash.borrow().bytes, &r_hash.borrow().bytes);
         self.set(p_index, Hex::encode(p_hash))
     }
 
+    /// Prune master hashmap for bloat only if shared_hash item is no longer being referenced
     fn prune(&mut self, index: usize) {
         use std::rc::Rc;
 
-        // Prune master hashmap for bloat only if shared_hash is no longer being referenced
         if let Some(shared_hash) = self.store.get(&index) {
             // if this is the last reference to this shared hash other than
             // the original, remove it from the store, and remove it from shared
@@ -245,15 +299,17 @@ impl MerkleTree {
         }
     }
 
+    /// Simple check to ensure leaf index is valid
     fn valid_leaf_index(&self, leaf_index: usize) -> bool {
         if leaf_index + self.leaf_start_index < self.size {
             true
         } else {
-            eprintln!("leaf index is not valid");
+            eprintln!("Leaf index is not valid");
             false
         }
     }
 
+    /// Simple equation to determine tree total size given depth
     fn size(depth: usize) -> usize {
         usize::pow(2, depth as u32) - 1
     }
@@ -261,11 +317,13 @@ impl MerkleTree {
     /******************* Test-only API ********************/
 
     #[cfg(test)]
+    /// Test-only : Checks if key is found in single master copy table
     pub(crate) fn contains_key(&self, key: &str) -> bool {
         self.master.contains_key(key)
     }
 
     #[cfg(test)]
+    /// Test-only : Check if key is found at specific index within store table
     pub(crate) fn contains_key_at(&self, index: usize, key: &str) -> bool {
         if let Some(shared_item) = self.store.get(&index) {
             shared_item.borrow().hash_key == key
@@ -275,15 +333,15 @@ impl MerkleTree {
     }
 
     #[cfg(test)]
-    pub(crate) fn key_at(&self, index: usize) -> String {
-        if let Some(shared_item) = self.store.get(&index) {
-            shared_item.borrow().hash_key.clone()
-        } else {
-            String::new()
-        }
+    /// Test-only : Returns hash key string found at node index
+    pub(crate) fn key_at(&self, index: usize) -> Option<String> {
+        self.store
+            .get(&index)
+            .map(|shared_item| shared_item.borrow().hash_key.clone())
     }
 
     #[cfg(test)]
+    /// Test-only : Returns size of master table elements
     pub(crate) fn master_size(&self) -> usize {
         self.master.len()
     }
@@ -294,16 +352,31 @@ mod tests {
     use super::*;
 
     #[test]
-    pub fn parent_test() {
+    pub fn parent_child_test() {
+        // TODO: Great place for a prop_test
         let tree: MerkleTree = MerkleTree::new(5, "abcdef");
 
         assert_eq!(0, tree.parent_index(0));
         assert_eq!(0, tree.parent_index(345));
+        assert_eq!(0, tree.left_child_index(345));
+        assert_eq!(0, tree.right_child_index(345));
+
+        assert_eq!(0, tree.left_child_index(23));
+        assert_eq!(0, tree.right_child_index(23));
 
         assert_eq!(0, tree.parent_index(1));
 
         assert_eq!(1, tree.parent_index(3));
+        assert_eq!(3, tree.left_child_index(1));
+
         assert_eq!(2, tree.parent_index(6));
+        assert_eq!(6, tree.right_child_index(2));
+
+        assert_eq!(tree.index(4, 5), 20);
+        assert_eq!(tree.index(3, 3), 10);
+        assert_eq!(tree.index(2, 1), 4);
+        assert_eq!(tree.index(1, 0), 1);
+        assert_eq!(tree.index(0, 0), 0);
 
         // given a tree of depth 4 the leaves are 7..14, the grandparents
         // are either 1 or 2, with parents being either 3, 4 and 5, 6
@@ -417,26 +490,29 @@ mod tests {
             "35e794f1b42c224a8e390ce37e141a8d74aa53e151c1d1b9a03f88c65adb9e10"
         );
 
+        tree_set_with_scale(20);
+
         tree = tree_set_with_scale(5);
         assert_eq!(
             tree.root(),
             "57054e43fa56333fd51343b09460d48b9204999c376624f52480c5593b91eff4"
         );
 
+        // test specify values from tree with depth 5
         assert_eq!(
-            tree.key_at(17),
+            tree.key_at(17).unwrap(),
             "2222222222222222222222222222222222222222222222222222222222222222"
         );
         assert_eq!(
-            tree.key_at(7),
+            tree.key_at(7).unwrap(),
             "35e794f1b42c224a8e390ce37e141a8d74aa53e151c1d1b9a03f88c65adb9e10"
         );
         assert_eq!(
-            tree.key_at(4),
+            tree.key_at(4).unwrap(),
             "26fca7737f48fa702664c8b468e34c858e62f51762386bd0bddaa7050e0dd7c0"
         );
         assert_eq!(
-            tree.key_at(2),
+            tree.key_at(2).unwrap(),
             "e7e11a86a0c1d8d8624b1629cb58e39bb4d0364cb8cb33c4029662ab30336858"
         );
     }
@@ -453,17 +529,19 @@ mod tests {
         assert_eq!(tree.master_size(), depth);
 
         for i in 0..tree.num_leaves() {
-            tree.set_with_scale(
+            if let Err(_) = tree.set_with_scale(
                 i,
                 i,
                 "1111111111111111111111111111111111111111111111111111111111111111",
-            );
+            ) {
+                return tree;
+            }
         }
 
         // since all the leaves have changed, the intermediate node values change as a result
         // this percolates up to the root
         // the previous master values that were resident in the tree should be overwritten with new percolated values
-        // hence the master values table should be empty
+        // hence the master values table should be zero if there are no errors in setting new values
 
         assert_eq!(tree.master_size(), 0);
 
@@ -486,6 +564,7 @@ mod tests {
             "57054e43fa56333fd51343b09460d48b9204999c376624f52480c5593b91eff4"
         );
 
+        // Proof contain audit hashes of the sibling hashes
         let proof = vec![
             Left("2222222222222222222222222222222222222222222222222222222222222222"),
             Left("35e794f1b42c224a8e390ce37e141a8d74aa53e151c1d1b9a03f88c65adb9e10"),
@@ -493,6 +572,7 @@ mod tests {
             Right("e7e11a86a0c1d8d8624b1629cb58e39bb4d0364cb8cb33c4029662ab30336858"),
         ];
 
+        // Convert proof of str hashes into String hashes
         let proof: MerkleProof = proof
             .into_iter()
             .map(|item| item.map(|e_value| e_value.to_string()))
@@ -503,7 +583,21 @@ mod tests {
         let proof_3 = tree.proof(3);
         let leaf_3 = "3333333333333333333333333333333333333333333333333333333333333333";
 
-        let result = tree.verify(proof_3, leaf_3);
+        // verify proof with correct key value -- leaf 3, result should match root hash
+        let result = tree.verify(&proof_3, leaf_3);
         assert_eq!(result.unwrap(), tree.root());
+
+        let leaf_5 = "5555555555555555555555555555555555555555555555555555555555555555";
+        let result = tree.verify(&proof_3, leaf_5);
+        assert_ne!(result.unwrap(), tree.root());
+
+        let nonexistent_entry = 2390;
+        let invalid_proof = tree.proof(nonexistent_entry);
+
+        assert_eq!(invalid_proof, vec![]);
+        assert_eq!(
+            tree.verify(&invalid_proof, leaf_3),
+            Err(MerkError::VerifyFail(String::from("Proof empty")))
+        );
     }
 }
