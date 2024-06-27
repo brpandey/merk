@@ -69,6 +69,10 @@ impl Hex {
             return "0".repeat(v.len());
         }
 
+        if scale == 1 {
+            return v.to_string()
+        }
+
         let big_value_int = BigInt::parse_bytes(v.as_bytes(), HEX_BASE).unwrap();
         let scaled_value = &big_value_int * BigInt::from_usize(scale).unwrap();
 

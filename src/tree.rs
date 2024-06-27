@@ -85,14 +85,8 @@ impl MerkleTree {
             return Err(MerkError::NodeNotFound(String::from("Invalid leaf index")));
         }
 
-        let v = Hex::trim_prefix(value);
-        let value = if scale == 1 {
-            v.to_string()
-        } else {
-            Hex::scale(scale, v)
-        };
-
-        self.set(leaf_index + self.leaf_start_index, value)
+        let v = Hex::scale(scale, value);
+        self.set(leaf_index + self.leaf_start_index, v)
     }
 
     /// Given a tree and leaf index returns the merkle proof for that leaf
@@ -105,8 +99,6 @@ impl MerkleTree {
         if !self.valid_leaf_index(leaf_index) {
             return acc;
         }
-
-        let mut terminate = false;
 
         let mut index = leaf_index + self.leaf_start_index;
 
@@ -122,12 +114,11 @@ impl MerkleTree {
                 if let Some(sibling_hash) = self.store.get(&idx) {
                     sibling_hash.borrow().hash_key.clone()
                 } else {
-                    terminate = true;
                     String::new()
                 }
             });
 
-            if terminate {
+            if path_hash_item.is_empty() {
                 return vec![];
             }
 
